@@ -1,0 +1,239 @@
+\documentclass[12pt,journal,onecolumn]{IEEEtran}
+\usepackage{longtable}
+
+\begin{document}
+
+\title{Task 4: Prototype Implementation and Analysis}
+\author{Team 27}
+\maketitle
+
+\section{Prototype Scope}
+
+The prototype implements end-to-end non-trivial functionality for online interview preparation:
+
+\begin{itemize}
+    \item Role-based auth flow (student/admin)
+    \item Timed test lifecycle (start, session fetch, sample run, violation, final submit)
+    \item Async submission pipeline (API enqueue $\rightarrow$ worker evaluate $\rightarrow$ status update)
+    \item Admin management for questions and users
+    \item Student/admin analytics and monitoring endpoints
+\end{itemize}
+
+This satisfies the Task 4 requirement to demonstrate working architecture with significant end-to-end behavior.
+
+\section{Implemented Architecture (Current)}
+
+Current architecture pattern:
+\begin{itemize}
+    \item Modular monolith backend (Express + Mongoose modules)
+    \item Event-driven evaluation path using BullMQ worker
+    \item React frontend with role-protected routes
+    \item Redis for queue + telemetry storage
+    \item Docker sandbox for untrusted code execution
+    \item Local MongoDB URI by default (\texttt{mongodb://localhost:27017/interview\_platform})
+\end{itemize}
+
+Key backend modules in code:
+\begin{itemize}
+    \item \texttt{auth}, \texttt{users}, \texttt{questions}, \texttt{tests}, \texttt{submissions}, \texttt{analytics}, \texttt{monitor}, \texttt{evaluation}, \texttt{shared}
+\end{itemize}
+
+\section{Performance and Reliability Tactics Used}
+
+\subsection{Async queue decoupling}
+
+Files:
+\begin{itemize}
+    \item \texttt{backend/src/submissions/submissions.routes.js}
+    \item \texttt{backend/src/evaluation/queue.js}
+    \item \texttt{backend/src/worker.js}
+    \item \texttt{backend/src/evaluation/processSubmission.js}
+\end{itemize}
+
+Effect:
+\begin{itemize}
+    \item Submission API returns after persistence + enqueue (\texttt{202}), while heavy evaluation runs in worker.
+\end{itemize}
+
+\subsection{Cache-aside read path with invalidation}
+
+Files:
+\begin{itemize}
+    \item \texttt{backend/src/shared/summaryCache.js}
+    \item \texttt{backend/src/submissions/submissionReadService.js}
+    \item \texttt{backend/src/questions/questions.routes.js}
+\end{itemize}
+
+Effect:
+\begin{itemize}
+    \item Hot GET APIs (submissions list, topics, summaries) reuse cached payloads.
+    \item Write paths explicitly invalidate related cache keys.
+\end{itemize}
+
+\subsection{Startup warm-up for hot keys}
+
+Files:
+\begin{itemize}
+    \item \texttt{backend/src/shared/cacheWarmup.js}
+    \item \texttt{backend/src/server.js}
+\end{itemize}
+
+Effect:
+\begin{itemize}
+    \item Common read keys are loaded during startup to reduce cold-start read latency.
+\end{itemize}
+
+\subsection{Queue fallback for read reliability}
+
+File:
+\begin{itemize}
+    \item \texttt{backend/src/submissions/submissionReadService.js}
+\end{itemize}
+
+Effect:
+\begin{itemize}
+    \item If queue telemetry is unavailable, submissions list falls back to DB-only response instead of failing endpoint.
+\end{itemize}
+
+\section{Architecture Comparison}
+
+Compared architectures:
+
+\begin{enumerate}
+    \item Implemented: modular monolith + async worker queue
+    \item Alternative: modular monolith + synchronous in-request evaluation (no queue/worker split)
+\end{enumerate}
+
+\begin{longtable}{|p{3.2cm}|p{5.3cm}|p{5.3cm}|}
+\hline
+\textbf{Aspect} & \textbf{Implemented (Async Queue)} & \textbf{Alternative (Synchronous API Evaluation)} \\
+\hline
+Submission request path & Returns after DB + enqueue & Request waits for full evaluation \\
+\hline
+API responsiveness under long code runs & Better, because evaluation is off request path & Worse, because request remains open until evaluator finishes/fails \\
+\hline
+Failure isolation & Worker failure isolated from API request thread & Evaluation failure directly impacts API response path \\
+\hline
+Recovery control & Queue attempts + dead-letter queue & Mainly client retry behavior \\
+\hline
+Operational complexity & Higher (Redis + worker lifecycle) & Lower (fewer moving parts) \\
+\hline
+\end{longtable}
+
+Trade-off summary:
+\begin{itemize}
+    \item Implemented architecture improves responsiveness and isolation for heavy workloads.
+    \item Alternative is simpler operationally but gives poorer user experience during long/failed evaluations.
+\end{itemize}
+
+\section{Quantified NFRs (System-Level Constraints)}
+
+The following NFRs are written as measurable constraints with units and acceptance checks.
+
+\subsection{NFR1: Performance}
+
+System constraints:
+\begin{itemize}
+    \item Submission APIs return quickly because evaluation is asynchronous.
+    \item Hard evaluator time budget per run is limited by \texttt{DOCKER\_TIMEOUT\_SEC = 10s}.
+    \item Parallel evaluation capacity is \texttt{WORKER\_CONCURRENCY = 2}.
+    \item Read latency control via cache: submissions list TTL \texttt{8000 ms}, topics TTL \texttt{60000 ms}.
+\end{itemize}
+
+Quantified targets:
+\begin{itemize}
+    \item API acknowledgement latency (\texttt{POST /api/submissions}, \texttt{POST /api/tests/\{id\}/submit}) p95 $\leq$ \texttt{500 ms} under normal local load (excluding DB/Redis outage).
+    \item Queue wait estimate reported by API follows:
+    \item \texttt{expectedQueueWaitSec = round(waiting * avgEvalMs / (workers * 1000))}
+    \item Per question evaluation wall-time must be $\leq$ \texttt{10s} timeout budget (or marked failed/timeout).
+\end{itemize}
+
+Acceptance checks:
+\begin{itemize}
+    \item Verify p95 API latency from monitor snapshot (\texttt{/api/monitor/dashboard}).
+    \item Verify completed submissions expose \texttt{actualProcessingSeconds}.
+\end{itemize}
+
+\subsection{NFR2: Security}
+
+System constraints:
+\begin{itemize}
+    \item Untrusted code sandbox limits are fixed to CPU \texttt{1} core (\texttt{--cpus 1}), memory \texttt{256 MB} (\texttt{--memory 256m}), network disabled (\texttt{--network none}), timeout \texttt{10s}.
+    \item JWT validity window default is \texttt{24h}.
+    \item Public unauthenticated API surface is limited to \texttt{POST /api/auth/signup} and \texttt{POST /api/auth/signin}.
+\end{itemize}
+
+Quantified targets:
+\begin{itemize}
+    \item \texttt{100\%} of endpoints under \texttt{/api} except the two auth endpoints require valid JWT.
+    \item \texttt{100\%} of code evaluations execute inside container with network disabled.
+\end{itemize}
+
+Acceptance checks:
+\begin{itemize}
+    \item Route audit in app middleware and auth routes.
+    \item Docker command audit in evaluator runner for CPU/memory/network/timeout flags.
+\end{itemize}
+
+\subsection{NFR3: Reliability}
+
+System constraints:
+\begin{itemize}
+    \item Queue retry policy: attempts per job \texttt{2}, retry backoff exponential with base delay \texttt{1000 ms}.
+    \item Worker liveness telemetry: heartbeat interval \texttt{5000 ms}, stale threshold \texttt{30000 ms}.
+\end{itemize}
+
+Quantified targets:
+\begin{itemize}
+    \item Transient queue/worker failures should not cause immediate data loss because failed jobs get one retry window.
+    \item Read path degrades gracefully: if queue telemetry fails, submissions list still returns DB-backed response.
+\end{itemize}
+
+Acceptance checks:
+\begin{itemize}
+    \item Simulate queue telemetry failure and verify submissions API still responds successfully.
+    \item Verify failed jobs increment attempts and retry with configured backoff.
+\end{itemize}
+
+\subsection{NFR4: Availability}
+
+System constraints:
+\begin{itemize}
+    \item Readiness endpoint is strict dependency gate: \texttt{/health/ready} returns \texttt{503} when Mongo/Redis/worker readiness is not satisfied.
+    \item Liveness endpoint remains a process health check.
+\end{itemize}
+
+Quantified targets:
+\begin{itemize}
+    \item Readiness accuracy target: \texttt{100\%} dependency-aware status reporting.
+    \item Operational target: monthly availability $\geq$ \texttt{99.5\%} when dependencies are healthy.
+\end{itemize}
+
+Acceptance checks:
+\begin{itemize}
+    \item Stop Redis or worker and verify \texttt{/health/ready} returns \texttt{503}.
+    \item Restore dependencies and verify \texttt{/health/ready} returns \texttt{200}.
+\end{itemize}
+
+\section{Evidence Map (Key Files)}
+
+\begin{itemize}
+    \item Auth gate and health: \texttt{backend/src/app.js}
+    \item Queue config: \texttt{backend/src/evaluation/queue.js}
+    \item Worker lifecycle: \texttt{backend/src/worker.js}
+    \item Evaluation strategies/factory: \texttt{backend/src/evaluation/strategies/*}, \texttt{backend/src/evaluation/strategyFactory.js}
+    \item Docker sandbox runner: \texttt{backend/src/evaluation/dockerRunner.js}
+    \item Cache core: \texttt{backend/src/shared/summaryCache.js}
+    \item Cache warm-up: \texttt{backend/src/shared/cacheWarmup.js}
+    \item Submission read path: \texttt{backend/src/submissions/submissionReadService.js}
+    \item Topics cache + invalidation: \texttt{backend/src/questions/questions.routes.js}
+    \item Monitor endpoint: \texttt{backend/src/monitor/monitor.routes.js}
+\end{itemize}
+
+\section{Conclusion}
+
+Task 4 prototype architecture is aligned with the implemented codebase and supports the core non-trivial workflow.
+
+Compared with synchronous in-request evaluation, the current async queue architecture gives stronger response-time behavior and better failure isolation, while introducing manageable infrastructure complexity.
+
+\end{document}

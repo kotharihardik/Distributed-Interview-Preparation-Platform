@@ -1,0 +1,129 @@
+\documentclass[12pt,journal,onecolumn]{IEEEtran}
+\usepackage{longtable}
+
+\begin{document}
+
+\title{Task 1: Requirements and Subsystems}
+\author{Team 27}
+\maketitle
+
+\section{Functional and Non Functional Requirements}
+
+\subsection{Functional Requirements}
+\begin{itemize}
+    \item FR1: The system must support signup, signin, token verify, profile read and profile update for students and admins.
+    \item FR2: All protected APIs must require valid JWT token. Admin-only APIs must reject student role.
+    \item FR3: Admin must be able to create, edit, deactivate and permanently delete questions.
+    \item FR4: Question bank must support three types: code, MCQ and SQL.
+    \item FR5: Student must be able to start timed tests with filters: topic(s), type, difficulty, count and duration.
+    \item FR6: Timed-test question selection should avoid repeated questions for the same student when enough unseen questions are available.
+    \item FR7: If enough unseen questions are not available, controlled repetition is allowed so test creation does not fail.
+    \item FR8: Student must be able to run sample test cases for coding questions during active timed session.
+    \item FR9: Timed test must record anti-cheat violations and auto-submit on second violation.
+    \item FR10: Final timed-test submit must evaluate answers, store submissions and return summary (attempted, passed, average score).
+    \item FR11: Async submission API must support idempotency key and queue status tracking.
+    \item FR12: Admin must be able to manage users/students (list, edit, delete with safety checks).
+\end{itemize}
+
+\subsection{Non Functional Requirements}
+\begin{itemize}
+    \item NFR1 Performance: Submission create API should return quickly by queuing jobs so evaluation is decoupled from request path.
+    \item NFR2 Security: Passwords must be hashed with bcrypt. Code execution must run in isolated Docker container with limits (1 CPU, 256 MB memory, no network, timeout).
+    \item NFR3 Reliability: Queue processing must support retries and dead-letter handling for final failures.
+    \item NFR4 Availability: Health endpoints must expose service readiness for MongoDB, Redis and worker heartbeat.
+    \item NFR5 Usability: Timed-test start flow should remain short and explicit, with checklist and warning messages for anti-cheat rules.
+    \item NFR6 Maintainability: Backend must stay modular (auth, users, questions, tests, submissions, analytics, monitor, evaluation, shared).
+    \item NFR7 Observability: API and worker should emit structured logs and runtime telemetry for failures and latency.
+    \item NFR8 Freshness: Read cache must be invalidated on writes so updated submissions/topics are shown quickly.
+\end{itemize}
+
+\subsection{Quantified System-Level Constraints (NFR Targets)}
+\begin{longtable}{|p{2.2cm}|p{3.4cm}|p{4.6cm}|p{4.6cm}|}
+\hline
+\textbf{NFR} & \textbf{Metric} & \textbf{Target / Constraint} & \textbf{Acceptance Check} \\
+\hline
+NFR1 Performance & Submission API acknowledgement latency & p95 $\leq$ 500 ms under normal load (evaluation offloaded to worker) & Monitor \texttt{/api/monitor/dashboard} latency snapshot \\
+\hline
+NFR1 Performance & Evaluation time budget per question & hard timeout $\leq$ 10 s & Verify timeout behavior in evaluator logs/results \\
+\hline
+NFR2 Security & Sandbox isolation & 100\% code runs with \texttt{--cpus 1}, \texttt{--memory 256m}, \texttt{--network none} & Docker runner audit + sample executions \\
+\hline
+NFR2 Security & API protection coverage & 100\% \texttt{/api/*} protected except signup/signin & Route + middleware audit \\
+\hline
+NFR3 Reliability & Queue retry policy & attempts = 2, exponential backoff delay = 1000 ms & Queue config inspection + retry test \\
+\hline
+NFR4 Availability & Readiness dependency gate & \texttt{/health/ready} must return 503 when Mongo/Redis/worker unhealthy & Stop dependency and verify response \\
+\hline
+NFR7 Observability & Runtime telemetry window & API latency and worker telemetry snapshots available in 5-min runtime window & \texttt{/api/monitor/dashboard} response check \\
+\hline
+NFR8 Freshness & Read cache staleness control & submissions cache TTL 8000 ms, topics cache TTL 60000 ms & Verify TTL config + invalidation on writes \\
+\hline
+\end{longtable}
+
+\section{Architecturally Significant Requirements}
+
+\subsection{ASR1 Secure Code Execution}
+Student code is untrusted input. It must execute inside sandbox containers so host API process remains protected.
+
+\subsection{ASR2 Async Submission Processing}
+Code evaluation is expensive. API path must enqueue and return immediately, while worker processes evaluation asynchronously.
+
+\subsection{ASR3 Strong API Access Control}
+Role separation (student vs admin) must be enforced at API level, not only in frontend UI.
+
+\subsection{ASR4 Fast Read Path with Correctness}
+Hot read APIs (submissions list, topic list, summaries) need cache for speed, but invalidation must keep data fresh.
+
+\subsection{ASR5 Exam Integrity for Timed Tests}
+Violation tracking, auto-submit threshold and session ownership checks are critical for test integrity.
+
+\section{Subsystem Overview}
+
+The platform is implemented as a modular monolith API + React frontend, with async worker for heavy evaluation.
+
+\subsection{Presentation Subsystem}
+\begin{itemize}
+    \item Frontend Pages: login/signup, student dashboard, student submissions, timed test pages, admin dashboard, admin users, admin questions, profile.
+    \item Role-aware Navigation: Student and admin pages are separated and route-protected.
+\end{itemize}
+
+\subsection{Identity and Access Subsystem}
+\begin{itemize}
+    \item Auth Module: signup/signin/verify/profile with JWT and bcrypt.
+    \item Users Module: admin user management with role filter and safety protections.
+\end{itemize}
+
+\subsection{Test and Question Subsystem}
+\begin{itemize}
+    \item Questions Module: CRUD for code/MCQ/SQL with topic APIs and role-based sanitization.
+    \item Timed Tests Module: test generation/start/session/violation/sample-run/final-submit with no-repeat preference and fallback.
+\end{itemize}
+
+\subsection{Evaluation and Queue Subsystem}
+\begin{itemize}
+    \item Strategy-based Evaluators: code, MCQ, SQL strategies.
+    \item Queue Layer: BullMQ queue with retries and dead-letter queue.
+    \item Worker Process: async job execution and telemetry updates.
+\end{itemize}
+
+\subsection{Analytics and Monitoring Subsystem}
+\begin{itemize}
+    \item Analytics Module: student summary and admin overview.
+    \item Monitor Module: API latency, queue metrics, worker metrics.
+    \item Health Module: liveness and readiness endpoints.
+\end{itemize}
+
+\subsection{Data and Cache Subsystem}
+\begin{itemize}
+    \item MongoDB + Mongoose: users, questions, test sessions, submissions, violation audits.
+    \item In-memory Read Cache: summaries, submissions list, topics with warm-up and invalidation.
+\end{itemize}
+
+\subsection{Runtime Dependencies}
+\begin{itemize}
+    \item Local MongoDB instance (Compass compatible URI) for persistent data.
+    \item Redis for queue and queue metrics.
+    \item Docker engine for sandboxed code execution containers.
+\end{itemize}
+
+\end{document}

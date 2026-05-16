@@ -1,0 +1,262 @@
+\documentclass[12pt,journal,onecolumn]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{longtable}
+
+\begin{document}
+
+\title{Task 3: Architectural Tactics and Patterns}
+\author{Team 27}
+\maketitle
+
+\section{Goal and Scope}
+
+This document maps implemented architecture tactics and design patterns to non-functional requirements (NFRs) from Task 1.
+
+The focus is only on what is currently implemented in the prototype codebase (Task4 backend and frontend), without planned-only items.
+
+\section{Implemented Architectural Tactics}
+
+\subsection{Tactic 1: Asynchronous Submission Processing (Queue + Worker)}
+
+\textbf{What is implemented}
+\begin{itemize}
+    \item Submission API stores request as \texttt{QUEUED} and pushes job to BullMQ queue.
+    \item Worker consumes jobs and updates lifecycle (\texttt{QUEUED -> RUNNING -> COMPLETED/FAILED}).
+    \item Queue status endpoint provides waiting/active/completed/failed counts.
+\end{itemize}
+
+\textbf{Code evidence}
+\begin{itemize}
+    \item \texttt{Task4/backend/src/submissions/submissions.routes.js}
+    \item \texttt{Task4/backend/src/evaluation/queue.js}
+    \item \texttt{Task4/backend/src/worker.js}
+    \item \texttt{Task4/backend/src/evaluation/processSubmission.js}
+\end{itemize}
+
+\textbf{NFR mapping}
+\begin{itemize}
+    \item NFR1 Performance: request path is short because evaluation runs in worker.
+    \item NFR3 Reliability: retries and dead-letter queue are configured for failure handling.
+    \item NFR4 Availability: heavy evaluation does not block normal API requests.
+\end{itemize}
+
+\textbf{Trade-off}: Better responsiveness, but added operational complexity (Redis + worker + queue monitoring).
+
+\subsection{Tactic 2: Sandboxed Code Execution with Resource Limits}
+
+\textbf{What is implemented}
+\begin{itemize}
+    \item Code submissions are executed inside Docker containers.
+    \item Runtime limits are enforced with \texttt{--cpus 1}, \texttt{--memory 256m}, \texttt{--network none}, and timeout handling.
+\end{itemize}
+
+\textbf{Code evidence}
+\begin{itemize}
+    \item \texttt{Task4/backend/src/evaluation/dockerRunner.js}
+\end{itemize}
+
+\textbf{NFR mapping}
+\begin{itemize}
+    \item NFR2 Security: untrusted code is isolated from API process and host network.
+    \item NFR3 Reliability: timeouts and limits reduce risk of runaway execution.
+\end{itemize}
+
+\textbf{Trade-off}: Strong safety, but extra startup and execution overhead compared to in-process execution.
+
+\subsection{Tactic 3: Cache-Aside Read Path with Invalidation and Warm-Up}
+
+\textbf{What is implemented}
+\begin{itemize}
+    \item Hot read APIs use in-memory cache (submissions list, question topics, summaries).
+    \item Cache invalidation runs on relevant write operations.
+    \item Startup warm-up preloads selected caches.
+\end{itemize}
+
+\textbf{Code evidence}
+\begin{itemize}
+    \item \texttt{Task4/backend/src/shared/summaryCache.js}
+    \item \texttt{Task4/backend/src/submissions/submissionReadService.js}
+    \item \texttt{Task4/backend/src/questions/questions.routes.js}
+    \item \texttt{Task4/backend/src/shared/cacheWarmup.js}
+    \item \texttt{Task4/backend/src/server.js}
+\end{itemize}
+
+\textbf{NFR mapping}
+\begin{itemize}
+    \item NFR1 Performance: repeated reads are served faster.
+    \item NFR8 Freshness: explicit invalidation keeps cache aligned after writes.
+\end{itemize}
+
+\textbf{Trade-off}: Better read speed, but requires careful invalidation to avoid stale responses.
+
+\subsection{Tactic 4: Centralized API Authentication + Role-Based Authorization}
+
+\textbf{What is implemented}
+\begin{itemize}
+    \item Global middleware on \texttt{/api} enforces authentication except signup/signin.
+    \item Admin-only routes use role guard middleware.
+    \item User management routes include safety constraints (cannot self-delete, seed admin protections).
+\end{itemize}
+
+\textbf{Code evidence}
+\begin{itemize}
+    \item \texttt{Task4/backend/src/app.js}
+    \item \texttt{Task4/backend/src/shared/middleware/requireAuth.js}
+    \item \texttt{Task4/backend/src/shared/middleware/requireRole.js}
+    \item \texttt{Task4/backend/src/users/users.routes.js}
+\end{itemize}
+
+\textbf{NFR mapping}
+\begin{itemize}
+    \item NFR2 Security: protected APIs are not accessible without valid token/role.
+    \item NFR6 Maintainability: centralized gate reduces repeated route-level security code.
+\end{itemize}
+
+\textbf{Trade-off}: Clear and consistent access control, but route exceptions must be maintained carefully.
+
+\subsection{Tactic 5: Runtime Observability (Health + Metrics + Structured Logs)}
+
+\textbf{What is implemented}
+\begin{itemize}
+    \item Health endpoints expose liveness and readiness for MongoDB, Redis and worker heartbeat.
+    \item Runtime metrics include API latency samples and worker queue/evaluation telemetry.
+    \item Admin monitor dashboard endpoint aggregates API, queue and worker data.
+\end{itemize}
+
+\textbf{Code evidence}
+\begin{itemize}
+    \item \texttt{Task4/backend/src/app.js}
+    \item \texttt{Task4/backend/src/shared/runtimeMetrics.js}
+    \item \texttt{Task4/backend/src/shared/workerTelemetry.js}
+    \item \texttt{Task4/backend/src/monitor/monitor.routes.js}
+\end{itemize}
+
+\textbf{NFR mapping}
+\begin{itemize}
+    \item NFR4 Availability: readiness checks support faster failure detection.
+    \item NFR7 Observability: metrics/logs make production debugging easier.
+\end{itemize}
+
+\textbf{Trade-off}: Better operability, but extra telemetry code and storage overhead.
+
+\section{Implementation Patterns}
+
+\subsection{Pattern 1: Strategy Pattern (Evaluation Logic)}
+
+\textbf{Role in system}
+\begin{itemize}
+    \item Evaluation logic is split by question type: \texttt{CodeStrategy}, \texttt{McqStrategy}, \texttt{SqlStrategy}.
+    \item Each strategy implements its own \texttt{evaluate} behavior.
+\end{itemize}
+
+\textbf{Code evidence}
+\begin{itemize}
+    \item \texttt{Task4/backend/src/evaluation/strategies/CodeStrategy.js}
+    \item \texttt{Task4/backend/src/evaluation/strategies/McqStrategy.js}
+    \item \texttt{Task4/backend/src/evaluation/strategies/SqlStrategy.js}
+    \item \texttt{Task4/backend/src/evaluation/processSubmission.js}
+\end{itemize}
+
+\textbf{Why this pattern fits}
+\begin{itemize}
+    \item Prevents one large conditional block for all question types.
+    \item Makes each evaluator easier to test and evolve independently.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.70\linewidth]{diagrams/task3-uml-strategy.png}
+\caption{Task 3 UML strategy pattern}
+\label{fig:task3-strategy}
+\end{figure}
+
+Diagram source: \texttt{diagrams/task3-uml-strategy.mmd}
+
+\subsection{Pattern 2: Factory Method Pattern (Strategy Creation)}
+
+\textbf{Role in system}
+\begin{itemize}
+    \item \texttt{createEvaluationStrategy(type)} creates concrete strategy instance based on question type.
+    \item Processing pipeline depends on abstraction (\texttt{strategy.evaluate}) instead of direct class construction in multiple places.
+\end{itemize}
+
+\textbf{Code evidence}
+\begin{itemize}
+    \item \texttt{Task4/backend/src/evaluation/strategyFactory.js}
+    \item \texttt{Task4/backend/src/evaluation/processSubmission.js}
+\end{itemize}
+
+\textbf{Why this pattern fits}
+\begin{itemize}
+    \item Centralizes creation logic for evaluators.
+    \item Adding a new evaluator type mainly affects one mapping point.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.50\linewidth]{diagrams/task3-uml-factory.png}
+\caption{Task 3 UML factory pattern}
+\label{fig:task3-factory}
+\end{figure}
+
+Diagram source: \texttt{diagrams/task3-uml-factory.mmd}
+
+\section{Architecture Pattern Context}
+
+\subsection{Modular Monolith}
+\begin{itemize}
+    \item Single backend deployable with clear internal modules (auth, users, questions, tests, submissions, evaluation, analytics, monitor).
+    \item Fits team size and prototype delivery timeline.
+\end{itemize}
+
+\subsection{Event-Driven Worker Flow}
+\begin{itemize}
+    \item Submission processing is event/job driven through BullMQ queue and worker consumers.
+    \item Decouples request-response API from evaluation execution path.
+\end{itemize}
+
+\section{NFR to Tactic Traceability Matrix}
+
+\begin{longtable}{|p{3cm}|p{5cm}|p{6cm}|}
+\hline
+\textbf{NFR} & \textbf{Main Tactics} & \textbf{Evidence} \\
+\hline
+NFR1 Performance & Async queue, cache-aside reads & submissions routes, queue/worker, submissionReadService \\
+\hline
+NFR2 Security & Auth gate, role checks, Docker sandbox & app.js auth middleware, requireRole, dockerRunner \\
+\hline
+NFR3 Reliability & Queue retries, dead-letter queue, execution timeout & queue.js, worker.js, dockerRunner.js \\
+\hline
+NFR4 Availability & Readiness endpoints, worker heartbeat metrics & app.js health endpoints, workerTelemetry \\
+\hline
+NFR6 Maintainability & Modular monolith boundaries, strategy + factory separation & module structure, strategyFactory, strategies \\
+\hline
+NFR7 Observability & Structured request logs, monitor dashboard, telemetry snapshots & app.js logger, monitor.routes, runtimeMetrics \\
+\hline
+NFR8 Freshness & Cache invalidation on write paths & summaryCache + submissions/questions write handlers \\
+\hline
+\end{longtable}
+
+\section{System Diagram}
+
+\subsection{C4 System Context View}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{diagrams/task3-c4-system-context.png}
+\caption{Task 3 C4 system context view}
+\label{fig:task3-context}
+\end{figure}
+
+Diagram source: \texttt{diagrams/task3-c4-system-context.mmd}
+
+\subsection{C4 Style Container View}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{diagrams/task3-c4-container.png}
+\caption{Task 3 C4 container view}
+\label{fig:task3-c4}
+\end{figure}
+
+Diagram source: \texttt{diagrams/task3-c4-container.mmd}
+
+\end{document}
